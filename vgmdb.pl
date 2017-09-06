@@ -1,4 +1,4 @@
-#!/usr/bin/perl
+#!/usr/local/bin/perl
 # This will search for flac files on directories then will try to copy/tag them in the current directory via direct http queries to vgmdb.net, (or not).
 #my $content ="action=advancedsearch&albumtitles=Valkyrie+Profile+Covenant+of+the+Plume+Arrange+Album&catalognum=&composer=&arranger=&performer=&lyricist=&publisher=&game=&trackname=&notes=&anyfield=&releasedatemodifier=is&day=0&month=0&year=0&discsmodifier=is&discs=&albumadded=&albumlastedit=&scanupload=&tracklistadded=&tracklistlastedit=&sortby=albumtitle&orderby=ASC&childmodifier=0&dosearch=Search+Albums+Now";
 
@@ -17,8 +17,8 @@ use Term::ANSIColor qw(:constants);
 $Term::ANSIColor::AUTORESET = 1;
 
 $0 =~ s/.*\///g;
-my $username   = '';
-my $password   = '';
+my $username   = 'XXXXXXXXXX';
+my $password   = 'XXXXXXXXXX';
 my $force      = 0;
 my $ktitle     = 0;
 my $id         = 0;
@@ -28,8 +28,9 @@ my %cd=();
 my %vgm=();
 my @catnums=();
 my @log=();
-my $cookie_jar = HTTP::Cookies->new( autosave => 1 );
 my $vgmuserid  = 0;
+my $cookie_jar = HTTP::Cookies->new( autosave => 1 );
+$cookie_jar->set_cookie(0, 'gfa_nsfw', 'show', '/', 'vgmdb.net', 80);
 
 GetOptions ( 'force=i'     => \$force
            , 'ktitle'      => \$ktitle
@@ -130,7 +131,7 @@ sub prepareresp(%) {
 #{{{    sub savefile
 sub savefile($$$) {
     my $url      = shift || return 0;
-    my $filename = shift || 'cover';
+    my $filename = shift || 'folder';
     my $dir      = shift || '.';
     unless (-f "$dir/$filename") {
         mkdir "$dir" unless -d $dir;
@@ -202,7 +203,6 @@ sub hashfiles(@) {
         my $flac = Audio::FLAC::Header->new($_);
         my $info = $flac->info();
         my $tags = $flac->tags();
-        $curalbum = $tags->{ALBUM} || $tags->{album} || "";
         my $secsre = $info->{TOTALSAMPLES} / $info->{SAMPLERATE};
         $secsre =~ s/\.\d+$//g;
         my $secs = sprintf ("%.2d:%.2d", $secsre/60%60, $secsre%60);
@@ -210,15 +210,12 @@ sub hashfiles(@) {
         $tnumber = $count unless $tnumber =~ /^\d\d$/;
         $tnumber = sprintf ("%02d", $tnumber) if length($tnumber) == 1;
         $count++;
-        $cd{$tnumber} = {  TITLE  => $tags->{TITLE}  || $tags->{title}  || ""
-                        ,  ALBUM  => $tags->{ALBUM}  || $tags->{album}  || ""
-                        ,  GENRE  => $tags->{GENRE}  || $tags->{genre}  || ""
-                        ,  ARTIST => $tags->{ARTIST} || $tags->{artist} || ""
-                        ,  DATE   => $tags->{DATE}   || $tags->{date}   || ""
-                        ,  TIME   => $secs
+        $cd{$tnumber} = {  TIME   => $secs
                         ,  TIMES  => $secsre
                         ,  FNAME  => $_
                         };
+        map {$cd{$tnumber}{uc($_)} = $tags->{$_}} keys  %{ $tags };
+        $curalbum = $tags->{ALBUM} || $tags->{album} || "";
     }
     dprint BLUE BOLD "\n"."=" x (23+length($curalbum)+length(keys(%cd)))."\n";
     dprint BLUE BOLD "Album: '$curalbum' with ".keys(%cd)." tracks.\n";
@@ -281,8 +278,9 @@ sub vgmdbid(@) {
     $vgm{URL}="http://vgmdb.net/album/$_";
     my $page = &prepareresp(&http($vgm{URL}));
 
-    if ($page =~ /<img id="coverart" src=.(.+?). /) {
-        $vgm{COVER}="http://vgmdb.net/$1";
+    if ($page =~ /<div id="coverart".+?style="background-image: url\(\'([^\']+)\'/) {
+    #if ($page =~ /<img id="coverart" style="background-image: url\(\'([^\']+)\'/) {
+        $vgm{COVER}=$1;
         dprint BLUE BOLD "Cover Art:\t"; dprint "'$vgm{COVER}'\n";
     }
 
@@ -365,13 +363,14 @@ sub vgmdbid(@) {
             }
             dprint sprintf ("%-3.3s %-62.62s %-8.8s %-4.4s\n", $track, $name, $time, $secs);
             next if $name =~ /data track/i;
+            next unless $secs or $force;
             $vgm{"CD$disc"}{$track} = { TITLE => $name
                                       , TIME  => $time
                                       , SECS  => $secs
                                       };
             ($track,$name)=(0,0);
         }
-        if ( $_ =~ /\s+<span class="time">([\d:]+)<\/span>/) {
+        if ( $_ =~ /\s+<span class="time">([\d:]+)<\/span>/ ) {
             dprint GREEN "=" x 59; dprint YELLOW BOLD " Disc Length = $1\n";
         }
 
@@ -385,20 +384,23 @@ sub compare() {
     dprint BLUE BOLD "Comparing last results with our tracks:\n";
     dprint BLUE BOLD "=" x (39)."\n\n";
     foreach my $vgmcd (sort keys %vgm) {
+        next if ($force and "CD${force}" ne "$vgmcd");
         next unless ref($vgm{$vgmcd}) eq "HASH" and $vgmcd =~ /^CD\d+$/; # Only the CDX hashes
         my $mark=0;
         my %current = %{$vgm{$vgmcd}};
         dprint "$vgmcd has ".keys(%current)." tracks and I got ".keys(%cd)." files...\t";
-        if (keys(%current) ne keys(%cd)) {
+        if (keys(%current) ne keys(%cd) and not $force) {
             dprint RED BOLD "SKIPPING\n";
             next;
         } else {
             dprint GREEN BOLD "OK!\n";
             dprint GREEN "\n  This CD -> Our Files:\n=========================\n";
-            foreach (sort keys %current) {
+            foreach (sort { $a <=> $b } keys %cd) {
+                $current{$_}{SECS} = 0 unless $current{$_}{SECS};
+                $current{$_}{TIMES} = 0 unless $current{$_}{TIMES};
                 dprint sprintf ("(%02d) % 4d -> (%02d) % 4d ", $_, $current{$_}{SECS}, $_, $cd{$_}{TIMES});
                 my $subs = $current{$_}{SECS} - $cd{$_}{TIMES};
-                $cd{$_}{NTITLE} = $current{$_}{TITLE};
+                $cd{$_}{NTITLE} = $current{$_}{TITLE} || $cd{$_}{TITLE};
                 if ($subs == 0) {
                     dprint GREEN BOLD "(0 secs) OK!\n";
                 } elsif ($subs > 0 and $subs < $threshold) {
@@ -453,11 +455,15 @@ sub rename($) {
         mkdir $cddir;
     }
 
-    foreach my $track (sort keys %cd) {
+    foreach my $track (sort {$a<=>$b} keys %cd) {
         # Header
         dprint "\n / Inside "; dprint BLUE BOLD "'$cddir'\n";
 
-        # Prepare/sanitize our title name
+        # Fill the tracknumber with zeroes
+        my $zerofill = length(scalar keys %cd);
+        my $ztrack = sprintf("%0${zerofill}d", $track);
+
+        # Prepare/sanitize our title nam
         $cd{$track}{NTITLE} = $cd{$track}{TITLE} if $ktitle and $cd{$track}{TITLE};
         $cd{$track}{NTITLE} = &escapename($cd{$track}{NTITLE}, '-');
         $cd{$track}{NTITLE} =~ s/[\/:|]/, /g; # and proper
@@ -472,11 +478,11 @@ sub rename($) {
             $cd{$track}{NTITLE} = substr($cd{$track}{NTITLE}, 0, $titlelength - $excess);
         }
 
-        my $destfile = "$cddir/$track $cd{$track}{NTITLE}.flac";
+        my $destfile = "$cddir/$ztrack $cd{$track}{NTITLE}.flac";
         $destfile =~ s/[\:*?<>|]//g; # NTFS Valid file?
         my $bytes=-s $cd{$track}{FNAME};
         dprint " | We will copy "; dprint YELLOW "'$cd{$track}{NTITLE}.flac' ($bytes bytes)\n";
-        dprint " | as "; dprint YELLOW "'$track $cd{$track}{NTITLE}.flac'\n";
+        dprint " | as "; dprint YELLOW "'$ztrack $cd{$track}{NTITLE}.flac'\n";
 
         if (-B $destfile) {
             dprint " | "; dprint YELLOW BOLD "WARNING! File already exists, skipping!\n";
@@ -517,7 +523,7 @@ sub rename($) {
             $vgm{'Arranged by'} = $aartist unless $vgm{'Arranged by'};
             $aartist =~ s/\s\/.*//g;
 
-            $tags->{TRACKNUMBER}    = $track                || "Not Available";
+            $tags->{TRACKNUMBER}    = $ztrack               || "Not Available";
             $tags->{TOTALTRACKS}    = keys(%cd)             || "Not Available";
             $tags->{ALBUM}          = $albumname            || "Not Available";
             $tags->{TITLE}          = $cd{$track}{'NTITLE'} || "Not Available";
@@ -534,7 +540,7 @@ sub rename($) {
             $tags->{COPYRIGHT}      = $vgm{'Published by'}  || "Not Available";
 
             # Hacemos un resumen de los tags para el log
-            foreach my $key (sort keys $tags) {
+            foreach my $key (sort keys %{ $tags }) {
                 dprint sprintf (" |-- %-12.12s = '%s'\n", $key, $tags->{$key});
             }
 
@@ -560,7 +566,7 @@ sub rename($) {
         dprint BLUE BOLD "\n"."=" x (15)."\n";
         dprint BLUE BOLD "Fetching Cover:\n";
         dprint BLUE BOLD "=" x (15)."\n\n";
-        &savefile($vgm{COVER}, 'cover', $cddir);
+        &savefile($vgm{COVER}, 'folder', $cddir);
     }
 
     if ($vgmuserid and $cdnum == 1) {
